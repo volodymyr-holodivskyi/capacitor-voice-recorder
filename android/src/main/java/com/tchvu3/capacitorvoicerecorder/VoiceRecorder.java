@@ -5,7 +5,11 @@ import android.content.Context;
 import android.media.AudioManager;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Base64;
+import android.util.Log;
+
 import com.getcapacitor.PermissionState;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -26,6 +30,37 @@ public class VoiceRecorder extends Plugin {
 
     static final String RECORD_AUDIO_ALIAS = "voice recording";
     private CustomMediaRecorder mediaRecorder;
+
+	private int silenceThreshold = 2000; // Amplitude threshold (tune for mic sensitivity)
+	private long silenceDuration = 3000; // 3 seconds of silence
+	private long lastVoiceTime;
+
+	private final Handler silenceHandler = new Handler(Looper.getMainLooper());
+	private final Runnable silenceCheckRunnable = new Runnable() {
+		@Override
+		public void run() {
+			try {
+				if (mediaRecorder == null) return;
+
+				int amplitude = mediaRecorder.getMaxAmplitude();
+				long currentTime = System.currentTimeMillis();
+
+				if (amplitude > silenceThreshold) {
+					lastVoiceTime = currentTime; // sound detected, reset timer
+				}
+
+				if (currentTime - lastVoiceTime > silenceDuration) {
+					Log.d("VoiceRecorder", "Silence detected. Stopping recording...");
+					stopRecordingOnSilence();
+					return;
+				}
+
+				silenceHandler.postDelayed(this, 300); // check every 300ms
+			} catch (Exception e) {
+				Log.e("VoiceRecorder", "Error checking silence", e);
+			}
+		}
+	};
 
     @PluginMethod
     public void canDeviceVoiceRecord(PluginCall call) {
@@ -80,9 +115,14 @@ public class VoiceRecorder extends Plugin {
         try {
             String directory = call.getString("directory");
             String subDirectory = call.getString("subDirectory");
-            RecordOptions options = new RecordOptions(directory, subDirectory);
+			Boolean stopOnSilence = call.getBoolean("stopOnSilence", false);
+            RecordOptions options = new RecordOptions(directory, subDirectory, stopOnSilence);
             mediaRecorder = new CustomMediaRecorder(getContext(), options);
             mediaRecorder.startRecording();
+			lastVoiceTime = System.currentTimeMillis();
+			if (options.getStopOnSilence()) {
+				silenceHandler.post(silenceCheckRunnable);
+			}
             call.resolve(ResponseGenerator.successResponse());
         } catch (Exception exp) {
             mediaRecorder = null;
@@ -102,13 +142,10 @@ public class VoiceRecorder extends Plugin {
             File recordedFile = mediaRecorder.getOutputFile();
             RecordOptions options = mediaRecorder.getRecordOptions();
 
-            String path = null;
             String recordDataBase64 = null;
+            String uri = null;
             if (options.getDirectory() != null) {
-                path = recordedFile.getName();
-                if (options.getSubDirectory() != null) {
-                    path = options.getSubDirectory() + "/" + path;
-                }
+                uri = Uri.fromFile(recordedFile).toString();
             } else {
                 recordDataBase64 = readRecordedFileAsBase64(recordedFile);
             }
@@ -117,9 +154,12 @@ public class VoiceRecorder extends Plugin {
                 recordDataBase64,
                 getMsDurationOfAudioFile(recordedFile.getAbsolutePath()),
                 "audio/aac",
-                path
+                uri
             );
-            if ((recordDataBase64 == null && path == null) || recordData.getMsDuration() < 0) {
+			if (options.getStopOnSilence()) {
+				silenceHandler.removeCallbacksAndMessages(null);
+			}
+            if ((recordDataBase64 == null && uri == null) || recordData.getMsDuration() < 0) {
                 call.reject(Messages.EMPTY_RECORDING);
             } else {
                 call.resolve(ResponseGenerator.dataResponse(recordData.toJSObject()));
@@ -170,6 +210,47 @@ public class VoiceRecorder extends Plugin {
             call.resolve(ResponseGenerator.statusResponse(mediaRecorder.getCurrentStatus()));
         }
     }
+
+	private void stopRecordingOnSilence() {
+		try {
+			mediaRecorder.stopRecording();
+			File recordedFile = mediaRecorder.getOutputFile();
+			RecordOptions options = mediaRecorder.getRecordOptions();
+
+			String recordDataBase64 = null;
+			String uri = null;
+			if (options.getDirectory() != null) {
+				uri = Uri.fromFile(recordedFile).toString();
+			} else {
+				recordDataBase64 = readRecordedFileAsBase64(recordedFile);
+			}
+
+			RecordData recordData = new RecordData(
+				recordDataBase64,
+				getMsDurationOfAudioFile(recordedFile.getAbsolutePath()),
+				"audio/aac",
+				uri
+			);
+			if (options.getStopOnSilence()) {
+				silenceHandler.removeCallbacksAndMessages(null);
+			}
+			if ((recordDataBase64 == null && uri == null) || recordData.getMsDuration() < 0) {
+				//call.reject(Messages.EMPTY_RECORDING);
+			} else {
+				//call.resolve(ResponseGenerator.dataResponse(recordData.toJSObject()));
+				notifyListeners("onSilence", ResponseGenerator.dataResponse(recordData.toJSObject()));
+			}
+		} catch (Exception exp) {
+			//call.reject(Messages.FAILED_TO_FETCH_RECORDING, exp);
+		} finally {
+			RecordOptions options = mediaRecorder.getRecordOptions();
+			if (options.getDirectory() == null) {
+				mediaRecorder.deleteOutputFile();
+			}
+
+			mediaRecorder = null;
+		}
+	}
 
     private boolean doesUserGaveAudioRecordingPermission() {
         return getPermissionState(VoiceRecorder.RECORD_AUDIO_ALIAS).equals(PermissionState.GRANTED);
