@@ -44,7 +44,13 @@ public class VoiceRecorder: CAPPlugin {
 
         let directory: String? = call.getString("directory")
         let subDirectory: String? = call.getString("subDirectory")
-        let recordOptions = RecordOptions(directory: directory, subDirectory: subDirectory)
+        let stopOnSilence: Bool? = call.getBool("stopOnSilence")
+        let recordOptions = RecordOptions(directory: directory, subDirectory: subDirectory, stopOnSilence: stopOnSilence)
+
+        customMediaRecorder?.setOnSilenceCallback { [weak self] in
+            self?.stopRecordingOnSilence()
+        }
+
         let successfullyStartedRecording = customMediaRecorder!.startRecording(recordOptions: recordOptions)
         if successfullyStartedRecording == false {
             customMediaRecorder = nil
@@ -136,6 +142,41 @@ public class VoiceRecorder: CAPPlugin {
             return -1
         }
         return Int(CMTimeGetSeconds(AVURLAsset(url: filePath!).duration) * 1000)
+    }
+
+    private func stopRecordingOnSilence() {
+        guard customMediaRecorder != nil else { return }
+
+        customMediaRecorder?.stopRecording()
+
+        let audioFileUrl = customMediaRecorder?.getOutputFile()
+        if audioFileUrl == nil {
+            customMediaRecorder = nil
+            return
+        }
+
+        var path = audioFileUrl!.lastPathComponent
+        if let subDirectory = customMediaRecorder?.options?.subDirectory {
+            path = subDirectory + "/" + path
+        }
+
+        let sendDataAsBase64 = customMediaRecorder?.options?.directory == nil
+        let recordData = RecordData(
+            recordDataBase64: sendDataAsBase64 ? readFileAsBase64(audioFileUrl) : nil,
+            mimeType: "audio/aac",
+            msDuration: getMsDurationOfAudioFile(audioFileUrl),
+            path: sendDataAsBase64 ? nil : path
+        )
+
+        customMediaRecorder = nil
+
+        if (sendDataAsBase64 && recordData.recordDataBase64 == nil) || recordData.msDuration < 0 {
+            // Empty recording, don't notify
+            // print("RECORDING Empty recording on silence")
+        } else {
+            // Notify listeners about silence detection
+            notifyListeners("onSilence", data: ResponseGenerator.dataResponse(recordData.toDictionary()))
+        }
     }
 
 }
