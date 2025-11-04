@@ -179,7 +179,7 @@ export class VoiceRecorderImpl {
 
         let path;
         let recordDataBase64;
-        if (options != null) {
+        if (options?.directory) {
           const subDirectory = options.subDirectory?.match(/^\/?(.+[^/])\/?$/)?.[1] ?? '';
           path = `${subDirectory}/recording-${new Date().getTime()}${POSSIBLE_MIME_TYPES[mimeType]}`;
 
